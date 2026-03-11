@@ -1,0 +1,24 @@
+{
+  "expo": {
+    "name": "City Explorer",
+    "slug": "city-explorer",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Разрешите доступ к геопозиции, чтобы показывать места рядом и строить маршруты."
+      }
+    },
+    "android": {
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION"
+      ],
+      "package": "com.anonymous.cityexplorer"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ]
+  }
+}
