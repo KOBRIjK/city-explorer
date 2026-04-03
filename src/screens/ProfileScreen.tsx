@@ -1,12 +1,10 @@
-import type { BottomTabNavigationProp } from "@react-navigation/bottom-tabs";
-import { useNavigation } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
-import { StyleSheet, Text, View } from "react-native";
+import { useEffect, useMemo, useState } from "react";
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 
-import type { MainTabParamList } from "../navigation/types";
-import { achievements, type Achievement } from "../data/mock";
-import { CloseButton } from "../components/CloseButton";
+import { fetchAchievements, fetchProfile } from "../api/client";
+import { useAuth } from "../auth/AuthContext";
 import { GlassCard } from "../components/GlassCard";
 import { IconCircle } from "../components/IconCircle";
 import { ProgressBar } from "../components/ProgressBar";
@@ -14,24 +12,32 @@ import { Screen } from "../components/Screen";
 import { colors } from "../theme/colors";
 import { radii } from "../theme/radii";
 import { space } from "../theme/spacing";
+import type { ApiAchievement, ApiProfile } from "../types/api";
 
-type Nav = BottomTabNavigationProp<MainTabParamList>;
-
-function achievementIconName(icon: Achievement["icon"]): keyof typeof Ionicons.glyphMap {
+function achievementIconName(icon: ApiAchievement["icon"]): keyof typeof Ionicons.glyphMap {
   switch (icon) {
-    case "walk":
-      return "footsteps-outline";
-    case "map":
-      return "map-outline";
-    case "run":
-      return "walk-outline";
-    case "moon":
-      return "moon-outline";
+    case "search":
+      return "search-outline";
+    case "phone":
+      return "phone-portrait-outline";
     case "trophy":
       return "trophy-outline";
-    case "diamond":
-      return "diamond-outline";
+    default:
+      return "ribbon-outline";
   }
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat("ru-RU").format(value);
+}
+
+function initials(fullName: string) {
+  return fullName
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("");
 }
 
 function StatTile({
@@ -52,9 +58,9 @@ function StatTile({
   );
 }
 
-function AchievementTile({ item }: { item: Achievement }) {
+function AchievementTile({ item }: { item: ApiAchievement }) {
   const gradient =
-    item.tone === "green"
+    item.earned
       ? (["#00D67D", "#A6FF00"] as const)
       : (["rgba(255,255,255,0.08)", "rgba(255,255,255,0.03)"] as const);
 
@@ -63,102 +69,173 @@ function AchievementTile({ item }: { item: Achievement }) {
       <Ionicons
         name={achievementIconName(item.icon)}
         size={22}
-        color={item.tone === "green" ? "#07321D" : colors.accent2}
+        color={item.earned ? "#07321D" : colors.accent2}
       />
-      <Text style={[styles.achievementText, item.tone === "green" ? { color: "#07321D" } : { color: colors.text }]}>
+      <Text style={[styles.achievementText, item.earned ? { color: "#07321D" } : { color: colors.text }]}>
         {item.title}
+      </Text>
+      <Text style={[styles.achievementHint, item.earned ? { color: "#07321D" } : { color: colors.muted }]}>
+        {item.description}
       </Text>
     </LinearGradient>
   );
 }
 
 export function ProfileScreen() {
-  const navigation = useNavigation<Nav>();
+  const { signOut, token } = useAuth();
+  const [profile, setProfile] = useState<ApiProfile | null>(null);
+  const [achievements, setAchievements] = useState<ApiAchievement[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!token) return;
+    const authToken = token;
+
+    let isMounted = true;
+
+    async function loadProfile() {
+      setIsLoading(true);
+      setError(null);
+
+      try {
+        const [nextProfile, nextAchievements] = await Promise.all([
+          fetchProfile(authToken),
+          fetchAchievements(authToken)
+        ]);
+
+        if (!isMounted) return;
+        setProfile(nextProfile);
+        setAchievements(nextAchievements);
+      } catch (nextError) {
+        if (isMounted) {
+          setError(nextError instanceof Error ? nextError.message : "Не удалось загрузить профиль.");
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    loadProfile();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [token]);
+
+  const progress = useMemo(() => {
+    if (!profile) return 0;
+    return profile.user.xp_next_level > 0 ? profile.user.xp / profile.user.xp_next_level : 0;
+  }, [profile]);
 
   return (
     <Screen scroll contentContainerStyle={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>Профиль</Text>
-        <CloseButton onPress={() => navigation.navigate("Map")} />
+        <Pressable onPress={signOut} style={styles.logoutButton}>
+          <Ionicons name="log-out-outline" size={16} color={colors.text} />
+          <Text style={styles.logoutText}>Выйти</Text>
+        </Pressable>
       </View>
 
-      <View style={styles.profileTop}>
-        <IconCircle size={72} backgroundColor={colors.accent} borderColor="rgba(0,0,0,0)">
-          <Text style={styles.avatarText}>АИ</Text>
-        </IconCircle>
-        <Text style={styles.name}>Александр Иванов</Text>
-        <Text style={styles.location}>Москва, Россия</Text>
-      </View>
-
-      <GlassCard style={styles.levelCard}>
-        <View style={styles.levelRow}>
-          <View style={styles.levelLeft}>
-            <IconCircle size={34} backgroundColor="rgba(166,255,0,0.15)" borderColor="rgba(166,255,0,0.30)">
-              <Ionicons name="star-outline" size={18} color={colors.accent2} />
+      {isLoading && !profile ? (
+        <View style={styles.loadingState}>
+          <ActivityIndicator color={colors.accent} />
+        </View>
+      ) : error ? (
+        <GlassCard style={styles.errorCard}>
+          <Text style={styles.errorTitle}>Не удалось загрузить профиль</Text>
+          <Text style={styles.errorText}>{error}</Text>
+        </GlassCard>
+      ) : profile ? (
+        <>
+          <View style={styles.profileTop}>
+            <IconCircle size={72} backgroundColor={colors.accent} borderColor="rgba(0,0,0,0)">
+              <Text style={styles.avatarText}>{initials(profile.user.full_name)}</Text>
             </IconCircle>
-            <View style={{ marginLeft: space.md }}>
-              <Text style={styles.levelTitle}>Уровень 12</Text>
-              <Text style={styles.levelSub}>Активный исследователь</Text>
+            <Text style={styles.name}>{profile.user.full_name}</Text>
+            <Text style={styles.location}>{profile.user.city}</Text>
+          </View>
+
+          <GlassCard style={styles.levelCard}>
+            <View style={styles.levelRow}>
+              <View style={styles.levelLeft}>
+                <IconCircle size={34} backgroundColor="rgba(166,255,0,0.15)" borderColor="rgba(166,255,0,0.30)">
+                  <Ionicons name="star-outline" size={18} color={colors.accent2} />
+                </IconCircle>
+                <View style={{ marginLeft: space.md }}>
+                  <Text style={styles.levelTitle}>Уровень {profile.user.level}</Text>
+                  <Text style={styles.levelSub}>Данные профиля подтягиваются из SQLite</Text>
+                </View>
+              </View>
+              <Text style={styles.levelXp}>
+                {formatNumber(profile.user.xp)} / {formatNumber(profile.user.xp_next_level)} XP
+              </Text>
+            </View>
+            <ProgressBar value={progress} style={{ marginTop: space.md }} />
+          </GlassCard>
+
+          <Text style={styles.sectionTitle}>
+            <Ionicons name="location-outline" size={14} color={colors.accent} /> Исследование города
+          </Text>
+          <GlassCard style={styles.exploreCard}>
+            <View style={styles.exploreHeaderRow}>
+              <Text style={styles.exploreLabel}>Открыто территории</Text>
+              <Text style={styles.exploreValue}>{profile.discovered_percent}%</Text>
+            </View>
+            <ProgressBar value={profile.discovered_percent / 100} style={{ marginTop: space.md }} />
+
+            <View style={styles.exploreStatsRow}>
+              <View style={styles.exploreStat}>
+                <Text style={styles.exploreStatValue}>{profile.districts_explored}</Text>
+                <Text style={styles.exploreStatLabel}>Районов</Text>
+              </View>
+              <View style={styles.exploreStat}>
+                <Text style={styles.exploreStatValue}>{profile.locations_discovered}</Text>
+                <Text style={styles.exploreStatLabel}>Локаций</Text>
+              </View>
+              <View style={styles.exploreStat}>
+                <Text style={styles.exploreStatValue}>{profile.secrets_found}</Text>
+                <Text style={styles.exploreStatLabel}>Секретов</Text>
+              </View>
+            </View>
+          </GlassCard>
+
+          <Text style={styles.sectionTitle}>
+            <Ionicons name="stats-chart-outline" size={14} color={colors.accent} /> Статистика
+          </Text>
+          <View style={styles.statsGrid}>
+            <View style={{ flexDirection: "row" }}>
+              <StatTile icon="radio-button-on-outline" value={formatNumber(profile.total_steps)} label="Всего шагов" />
+              <View style={{ width: space.md }} />
+              <StatTile icon="trending-up-outline" value={`${formatNumber(profile.total_distance_km)} км`} label="Дистанция" />
+            </View>
+            <View style={{ height: space.md }} />
+            <View style={{ flexDirection: "row" }}>
+              <StatTile icon="flash-outline" value={String(profile.active_days)} label="Активных дней" />
+              <View style={{ width: space.md }} />
+              <StatTile
+                icon="ribbon-outline"
+                value={`${profile.unlocked_achievements}/${profile.total_achievements}`}
+                label="Достижения"
+              />
             </View>
           </View>
-          <Text style={styles.levelXp}>3 250 / 5 000 XP</Text>
-        </View>
-        <ProgressBar value={0.65} style={{ marginTop: space.md }} />
-      </GlassCard>
 
-      <Text style={styles.sectionTitle}>
-        <Ionicons name="location-outline" size={14} color={colors.accent} /> Исследование города
-      </Text>
-      <GlassCard style={styles.exploreCard}>
-        <View style={styles.exploreHeaderRow}>
-          <Text style={styles.exploreLabel}>Открыто территории</Text>
-          <Text style={styles.exploreValue}>67%</Text>
-        </View>
-        <ProgressBar value={0.67} style={{ marginTop: space.md }} />
-
-        <View style={styles.exploreStatsRow}>
-          <View style={styles.exploreStat}>
-            <Text style={styles.exploreStatValue}>8</Text>
-            <Text style={styles.exploreStatLabel}>Районов</Text>
+          <Text style={styles.sectionTitle}>
+            <Ionicons name="trophy-outline" size={14} color={colors.accent2} /> Достижения
+          </Text>
+          <View style={styles.achievementsGrid}>
+            {achievements.map((achievement) => (
+              <View key={achievement.id} style={styles.achievementWrap}>
+                <AchievementTile item={achievement} />
+              </View>
+            ))}
           </View>
-          <View style={styles.exploreStat}>
-            <Text style={styles.exploreStatValue}>142</Text>
-            <Text style={styles.exploreStatLabel}>Локаций</Text>
-          </View>
-          <View style={styles.exploreStat}>
-            <Text style={styles.exploreStatValue}>23</Text>
-            <Text style={styles.exploreStatLabel}>Секретов</Text>
-          </View>
-        </View>
-      </GlassCard>
-
-      <Text style={styles.sectionTitle}>
-        <Ionicons name="stats-chart-outline" size={14} color={colors.accent} /> Статистика
-      </Text>
-      <View style={styles.statsGrid}>
-        <View style={{ flexDirection: "row" }}>
-          <StatTile icon="radio-button-on-outline" value="847K" label="Всего шагов" />
-          <View style={{ width: space.md }} />
-          <StatTile icon="trending-up-outline" value="342 км" label="Дистанция" />
-        </View>
-        <View style={{ height: space.md }} />
-        <View style={{ flexDirection: "row" }}>
-          <StatTile icon="flash-outline" value="45" label="Активных дней" />
-          <View style={{ width: space.md }} />
-          <StatTile icon="ribbon-outline" value="3/24" label="Достижения" />
-        </View>
-      </View>
-
-      <Text style={styles.sectionTitle}>
-        <Ionicons name="trophy-outline" size={14} color={colors.accent2} /> Достижения
-      </Text>
-      <View style={styles.achievementsGrid}>
-        {achievements.map((a) => (
-          <View key={a.id} style={styles.achievementWrap}>
-            <AchievementTile item={a} />
-          </View>
-        ))}
-      </View>
+        </>
+      ) : null}
     </Screen>
   );
 }
@@ -179,6 +256,42 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 22,
     fontWeight: "800"
+  },
+  logoutButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: radii.pill,
+    borderColor: colors.border,
+    borderWidth: 1,
+    backgroundColor: "rgba(255,255,255,0.04)"
+  },
+  logoutText: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: "800",
+    marginLeft: 6
+  },
+  loadingState: {
+    minHeight: 320,
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  errorCard: {
+    padding: space.lg,
+    borderRadius: radii.md
+  },
+  errorTitle: {
+    color: colors.text,
+    fontSize: 15,
+    fontWeight: "900"
+  },
+  errorText: {
+    color: colors.muted,
+    fontSize: 12,
+    marginTop: 6,
+    lineHeight: 18
   },
   profileTop: {
     alignItems: "center",
@@ -299,7 +412,7 @@ const styles = StyleSheet.create({
     marginBottom: space.md
   },
   achievementWrap: {
-    width: "33.3333%",
+    width: "50%",
     paddingRight: 10,
     paddingBottom: 10
   },
@@ -310,12 +423,18 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderColor: "rgba(255,255,255,0.10)",
     borderWidth: 1,
-    minHeight: 110
+    minHeight: 150
   },
   achievementText: {
     marginTop: 10,
     textAlign: "center",
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: "900"
+  },
+  achievementHint: {
+    marginTop: 8,
+    textAlign: "center",
+    fontSize: 11,
+    lineHeight: 16
   }
 });

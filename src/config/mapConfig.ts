@@ -4,10 +4,10 @@ import { pointSeeds, type PointMeta } from "../data/points";
 import { colors } from "../theme/colors";
 
 const defaultRegion: Region = {
-  latitude: 55.751244,
-  longitude: 37.618423,
-  latitudeDelta: 0.08,
-  longitudeDelta: 0.08
+  latitude: 55.7685806,
+  longitude: 49.1418968,
+  latitudeDelta: 0.02,
+  longitudeDelta: 0.02
 };
 
 const customPointMeta: PointMeta = {

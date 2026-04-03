@@ -1,46 +1,53 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { useEffect, useMemo, useState } from "react";
+import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from "react-native";
 
+import { fetchTasks } from "../api/client";
+import { useAuth } from "../auth/AuthContext";
 import { CloseButton } from "../components/CloseButton";
 import { GlassCard } from "../components/GlassCard";
 import { IconCircle } from "../components/IconCircle";
 import { ProgressBar } from "../components/ProgressBar";
 import { Screen } from "../components/Screen";
-import { tasks, type Task, type TaskDifficulty } from "../data/mock";
 import type { RootStackParamList } from "../navigation/types";
 import { colors } from "../theme/colors";
 import { radii } from "../theme/radii";
 import { space } from "../theme/spacing";
+import type { ApiTask } from "../types/api";
 
 type Nav = NativeStackNavigationProp<RootStackParamList, "TasksModal">;
 
-function difficultyStyle(difficulty: TaskDifficulty) {
+function difficultyStyle(difficulty: ApiTask["difficulty"]) {
   switch (difficulty) {
-    case "Легко":
-      return { bg: "rgba(0,214,125,0.16)", border: "rgba(0,214,125,0.30)", text: colors.accent };
-    case "Средне":
-      return { bg: "rgba(255,176,32,0.14)", border: "rgba(255,176,32,0.30)", text: colors.warning };
-    case "Сложно":
-      return { bg: "rgba(255,92,92,0.14)", border: "rgba(255,92,92,0.30)", text: colors.danger };
+    case "easy":
+      return { bg: "rgba(0,214,125,0.16)", border: "rgba(0,214,125,0.30)", text: colors.accent, label: "Лёгкое" };
+    case "medium":
+      return { bg: "rgba(255,176,32,0.14)", border: "rgba(255,176,32,0.30)", text: colors.warning, label: "Среднее" };
+    case "hard":
+      return { bg: "rgba(255,92,92,0.14)", border: "rgba(255,92,92,0.30)", text: colors.danger, label: "Сложное" };
   }
 }
 
-function taskIconName(icon: Task["icon"]): keyof typeof Ionicons.glyphMap {
+function taskIconName(icon: ApiTask["icon"]): keyof typeof Ionicons.glyphMap {
   switch (icon) {
-    case "leaf":
-      return "leaf-outline";
-    case "moon":
-      return "moon-outline";
-    case "business":
-      return "business-outline";
-    case "sunny":
-      return "sunny-outline";
+    case "rocket":
+      return "rocket-outline";
+    case "barbell":
+      return "barbell-outline";
+    case "flame":
+      return "flame-outline";
+    case "people":
+      return "people-outline";
+    case "trophy":
+      return "trophy-outline";
+    default:
+      return "flash-outline";
   }
 }
 
-function TaskCard({ task }: { task: Task }) {
+function TaskCard({ task }: { task: ApiTask }) {
   const pill = difficultyStyle(task.difficulty);
   const percent = Math.round(task.progress * 100);
 
@@ -63,26 +70,35 @@ function TaskCard({ task }: { task: Task }) {
         </View>
 
         <View style={[styles.difficultyPill, { backgroundColor: pill.bg, borderColor: pill.border }]}>
-          <Text style={[styles.difficultyText, { color: pill.text }]}>{task.difficulty}</Text>
+          <Text style={[styles.difficultyText, { color: pill.text }]}>{pill.label}</Text>
         </View>
       </View>
 
       <View style={styles.progressRow}>
-        <Text style={styles.progressText}>{task.progressText}</Text>
+        <Text style={styles.progressText}>{task.progress_text}</Text>
         <Text style={styles.progressPercent}>{percent}%</Text>
       </View>
       <ProgressBar value={task.progress} style={{ marginTop: space.sm }} />
 
+      <View style={styles.rewardCard}>
+        <Ionicons name="gift-outline" size={16} color={colors.accent} />
+        <Text style={styles.rewardText}>{task.reward_text}</Text>
+      </View>
+
       <View style={styles.taskFooterRow}>
         <View style={styles.footerMeta}>
           <Ionicons name="trophy-outline" size={14} color={colors.accent2} />
-          <Text style={styles.footerMetaText}>+{task.rewardXp} XP</Text>
+          <Text style={styles.footerMetaText}>+{task.reward_xp} XP</Text>
         </View>
         <View style={styles.footerMeta}>
           <Ionicons name="time-outline" size={14} color={colors.muted} />
-          <Text style={[styles.footerMetaText, { color: colors.muted }]}>{task.timeLeft}</Text>
+          <Text style={[styles.footerMetaText, { color: colors.muted }]}>{task.time_left}</Text>
         </View>
-        <Ionicons name="chevron-forward" size={18} color={colors.muted} style={{ marginLeft: "auto" }} />
+        {task.status === "completed" ? (
+          <View style={styles.completedBadge}>
+            <Text style={styles.completedBadgeText}>Готово</Text>
+          </View>
+        ) : null}
       </View>
     </GlassCard>
   );
@@ -90,35 +106,91 @@ function TaskCard({ task }: { task: Task }) {
 
 export function TasksScreen() {
   const navigation = useNavigation<Nav>();
+  const { token } = useAuth();
+  const [tasks, setTasks] = useState<ApiTask[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!token) return;
+    const authToken = token;
+
+    let isMounted = true;
+
+    async function loadTasks() {
+      setIsLoading(true);
+      setError(null);
+
+      try {
+        const nextTasks = await fetchTasks(authToken);
+        if (isMounted) {
+          setTasks(nextTasks);
+        }
+      } catch (nextError) {
+        if (isMounted) {
+          setError(nextError instanceof Error ? nextError.message : "Не удалось загрузить задания.");
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    loadTasks();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [token]);
+
+  const summary = useMemo(() => {
+    const active = tasks.filter((task) => task.status !== "completed").length;
+    const completedTasks = tasks.filter((task) => task.status === "completed");
+    const completed = completedTasks.length;
+    const earnedXp = completedTasks.reduce((sum, task) => sum + task.reward_xp, 0);
+    return { active, completed, earnedXp };
+  }, [tasks]);
 
   return (
     <Screen edges={["top", "bottom"]} style={{ flex: 1 }} contentContainerStyle={styles.root}>
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
           <Text style={styles.title}>Задания</Text>
-          <Text style={styles.subtitle}>Выполняй задания и зарабатывай очки опыта</Text>
+          <Text style={styles.subtitle}>Все задания загружаются из backend и связаны с профилем пользователя.</Text>
         </View>
         <CloseButton onPress={() => navigation.goBack()} />
       </View>
 
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: space.lg }}>
-        {tasks.map((t) => (
-          <TaskCard key={t.id} task={t} />
-        ))}
-      </ScrollView>
+      {isLoading && tasks.length === 0 ? (
+        <View style={styles.loadingState}>
+          <ActivityIndicator color={colors.accent} />
+        </View>
+      ) : error ? (
+        <GlassCard style={styles.errorCard}>
+          <Text style={styles.errorTitle}>Не удалось загрузить задания</Text>
+          <Text style={styles.errorText}>{error}</Text>
+        </GlassCard>
+      ) : (
+        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: space.lg }}>
+          {tasks.map((task) => (
+            <TaskCard key={task.id} task={task} />
+          ))}
+        </ScrollView>
+      )}
 
       <GlassCard style={styles.summary}>
         <View style={styles.summaryCol}>
-          <Text style={styles.summaryValue}>4</Text>
+          <Text style={styles.summaryValue}>{summary.active}</Text>
           <Text style={styles.summaryLabel}>Активных</Text>
         </View>
         <View style={styles.summaryCol}>
-          <Text style={[styles.summaryValue, { color: colors.accent2 }]}>12</Text>
+          <Text style={[styles.summaryValue, { color: colors.accent2 }]}>{summary.completed}</Text>
           <Text style={styles.summaryLabel}>Выполнено</Text>
         </View>
         <View style={styles.summaryCol}>
-          <Text style={[styles.summaryValue, { color: colors.warning }]}>3.2K</Text>
-          <Text style={styles.summaryLabel}>Всего XP</Text>
+          <Text style={[styles.summaryValue, { color: colors.warning }]}>{summary.earnedXp}</Text>
+          <Text style={styles.summaryLabel}>XP получено</Text>
         </View>
       </GlassCard>
     </Screen>
@@ -148,6 +220,27 @@ const styles = StyleSheet.create({
     marginTop: 6,
     paddingRight: 10
   },
+  loadingState: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  errorCard: {
+    padding: space.lg,
+    borderRadius: radii.md,
+    marginBottom: space.lg
+  },
+  errorTitle: {
+    color: colors.text,
+    fontSize: 15,
+    fontWeight: "900"
+  },
+  errorText: {
+    color: colors.muted,
+    fontSize: 12,
+    marginTop: 6,
+    lineHeight: 18
+  },
   taskCard: {
     padding: space.lg,
     borderRadius: radii.md,
@@ -171,7 +264,8 @@ const styles = StyleSheet.create({
   taskSubtitle: {
     color: colors.muted,
     fontSize: 12,
-    marginTop: 4
+    marginTop: 4,
+    lineHeight: 18
   },
   difficultyPill: {
     borderRadius: radii.pill,
@@ -198,6 +292,23 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "900"
   },
+  rewardCard: {
+    marginTop: space.md,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: "rgba(255,255,255,0.03)",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center"
+  },
+  rewardText: {
+    color: colors.text,
+    fontSize: 12,
+    marginLeft: 8,
+    flex: 1
+  },
   taskFooterRow: {
     marginTop: space.md,
     flexDirection: "row",
@@ -213,6 +324,20 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "900",
     marginLeft: 6
+  },
+  completedBadge: {
+    marginLeft: "auto",
+    borderRadius: radii.pill,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: "rgba(0,214,125,0.16)",
+    borderColor: "rgba(0,214,125,0.30)",
+    borderWidth: 1
+  },
+  completedBadgeText: {
+    color: colors.accent,
+    fontSize: 11,
+    fontWeight: "900"
   },
   summary: {
     flexDirection: "row",

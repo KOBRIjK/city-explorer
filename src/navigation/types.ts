@@ -6,7 +6,7 @@ export type MainTabParamList = {
 };
 
 export type RootStackParamList = {
+  Auth: undefined;
   MainTabs: undefined;
   TasksModal: undefined;
 };
-

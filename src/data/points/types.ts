@@ -1,4 +1,4 @@
-export type PointCategory = "park" | "center" | "landmark" | "custom";
+export type PointCategory = "park" | "center" | "landmark" | "sport" | "cybersport" | "custom";
 
 export type PointDifficulty = "easy" | "medium" | "hard";
 

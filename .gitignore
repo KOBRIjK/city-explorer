@@ -22,7 +22,12 @@ Thumbs.db
 # TypeScript
 *.tsbuildinfo
 
+# Backend
+backend/.venv/
+backend/__pycache__/
+backend/**/*.pyc
+backend/city_explorer.db
+
 # IDEs
 .idea/
 .vscode/
-
