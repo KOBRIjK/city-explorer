@@ -8,10 +8,11 @@ import { radii } from "../theme/radii";
 type Props = {
   value: number;
   height?: number;
+  fillColors?: readonly [string, string];
   style?: StyleProp<ViewStyle>;
 };
 
-export function ProgressBar({ value, height = 8, style }: Props) {
+export function ProgressBar({ value, height = 8, fillColors, style }: Props) {
   const clamped = Math.max(0, Math.min(1, value));
 
   return (
@@ -27,7 +28,7 @@ export function ProgressBar({ value, height = 8, style }: Props) {
       ]}
     >
       <LinearGradient
-        colors={[colors.accent, colors.accent2]}
+        colors={fillColors ?? [colors.accent, colors.accent2]}
         start={{ x: 0, y: 0.5 }}
         end={{ x: 1, y: 0.5 }}
         style={{
@@ -38,4 +39,3 @@ export function ProgressBar({ value, height = 8, style }: Props) {
     </View>
   );
 }
-

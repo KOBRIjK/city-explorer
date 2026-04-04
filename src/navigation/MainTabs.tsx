@@ -2,6 +2,7 @@ import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { Ionicons } from "@expo/vector-icons";
 
 import type { MainTabParamList } from "./types";
+import { mainTabBarStyle } from "./tabBarConfig";
 import { MapScreen } from "../screens/MapScreen";
 import { PartnersScreen } from "../screens/PartnersScreen";
 import { RatingScreen } from "../screens/RatingScreen";
@@ -17,17 +18,10 @@ export function MainTabs() {
         headerShown: false,
         tabBarActiveTintColor: colors.accent,
         tabBarInactiveTintColor: colors.muted,
-        tabBarStyle: {
-          backgroundColor: colors.tabBar,
-          borderTopColor: colors.border,
-          borderTopWidth: 1,
-          height: 72,
-          paddingTop: 8,
-          paddingBottom: 12,
-        },
+        tabBarStyle: mainTabBarStyle,
         tabBarLabelStyle: {
           fontSize: 11,
-          marginTop: 2,
+          marginTop: 2
         },
         tabBarIcon: ({ color, size, focused }) => {
           const iconName = (() => {
@@ -64,4 +58,3 @@ export function MainTabs() {
     </Tab.Navigator>
   );
 }
-

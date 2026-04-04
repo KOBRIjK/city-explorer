@@ -1,32 +1,41 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useBottomTabBarHeight } from "@react-navigation/bottom-tabs";
+import { type BottomTabNavigationProp, useBottomTabBarHeight } from "@react-navigation/bottom-tabs";
+import { useNavigation } from "@react-navigation/native";
 import { LinearGradient } from "expo-linear-gradient";
 import * as Location from "expo-location";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Animated,
   Image,
   type ImageSourcePropType,
   Linking,
+  Modal,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View
 } from "react-native";
 import MapView, {
   Marker,
   type LatLng
 } from "react-native-maps";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { fetchLocations, fetchTasks } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { GlassCard } from "../components/GlassCard";
 import { IconCircle } from "../components/IconCircle";
+import { LocationTaskCard } from "../components/map/LocationTaskCard";
 import { Screen } from "../components/Screen";
 import { mapConfig } from "../config/mapConfig";
 import type { PointMeta } from "../data/points";
+import { hiddenMainTabBarStyle, mainTabBarStyle } from "../navigation/tabBarConfig";
+import type { MainTabParamList } from "../navigation/types";
 import { colors } from "../theme/colors";
 import { radii } from "../theme/radii";
 import { space } from "../theme/spacing";
@@ -70,12 +79,6 @@ const DIFFICULTY_LABELS: Record<PointMeta["difficulty"], string> = {
   hard: "Сложная"
 };
 
-const TASK_DIFFICULTY_LABELS: Record<ApiTask["difficulty"], string> = {
-  easy: "Лёгкое",
-  medium: "Среднее",
-  hard: "Сложное"
-};
-
 const LOCATION_PHOTOS: Record<string, ImageSourcePropType[]> = {
   "rukh-fight-club": [
     require("../assets/rukh/image4.jpeg"),
@@ -84,12 +87,20 @@ const LOCATION_PHOTOS: Record<string, ImageSourcePropType[]> = {
   "rukh-cyberarena": [require("../assets/rukh/image6.jpeg")]
 };
 
+const SHEET_SNAP_POINTS = [0.27, 0.985] as const;
+const COLLAPSED_SHEET_MIN_HEIGHT = 180;
+const HERO_MEDIA_GAP = 28;
+
 function makeId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function formatCoords({ latitude, longitude }: LatLng) {
   return `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function formatPointMeta(meta: PointMeta) {
@@ -161,46 +172,178 @@ function normalizePlace(place: Place): Place {
   };
 }
 
-function difficultyPillStyle(difficulty: ApiTask["difficulty"]) {
-  switch (difficulty) {
-    case "easy":
-      return {
-        backgroundColor: "rgba(0,214,125,0.16)",
-        borderColor: "rgba(0,214,125,0.30)",
-        color: colors.accent
-      };
-    case "medium":
-      return {
-        backgroundColor: "rgba(255,176,32,0.14)",
-        borderColor: "rgba(255,176,32,0.30)",
-        color: colors.warning
-      };
-    case "hard":
-      return {
-        backgroundColor: "rgba(255,92,92,0.14)",
-        borderColor: "rgba(255,92,92,0.30)",
-        color: colors.danger
-      };
-  }
+function RoutePrimaryButton({ onPress, compact = false }: { onPress: () => void; compact?: boolean }) {
+  return (
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel="Построить маршрут">
+      <LinearGradient
+        colors={[colors.ctaStart, colors.ctaEnd]}
+        start={{ x: 0, y: 0.5 }}
+        end={{ x: 1, y: 0.5 }}
+        style={[styles.routeButton, compact ? styles.routeButtonCompact : null]}
+      >
+        <Ionicons name="navigate" size={compact ? 16 : 17} color={colors.textSoft} />
+        <Text style={[styles.routeButtonText, compact ? styles.routeButtonTextCompact : null]}>
+          Построить маршрут
+        </Text>
+      </LinearGradient>
+    </Pressable>
+  );
+}
+
+function MetaChip({ label, accent = false }: { label: string; accent?: boolean }) {
+  return (
+    <View style={[styles.metaChip, accent ? styles.metaChipAccent : undefined]}>
+      <Text style={[styles.metaChipText, accent ? styles.metaChipTextAccent : undefined]}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+function PhotoGallery({
+  photos,
+  photoWidth,
+  photoHeight,
+  onPhotoPress,
+  compact = false,
+  showTitle = true
+}: {
+  photos: ImageSourcePropType[];
+  photoWidth: number;
+  photoHeight: number;
+  onPhotoPress: (photo: ImageSourcePropType) => void;
+  compact?: boolean;
+  showTitle?: boolean;
+}) {
+  if (!photos.length) return null;
+
+  return (
+    <>
+      {showTitle ? <Text style={styles.sectionTitle}>Фото</Text> : null}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={[styles.photosRow, compact ? styles.photosRowCompact : null]}
+      >
+        {photos.map((photo, index) => (
+          <Pressable
+            key={`photo-${index}`}
+            onPress={() => onPhotoPress(photo)}
+            style={({ pressed }) => [
+              styles.photoPressable,
+              { width: photoWidth, height: photoHeight },
+              compact ? styles.photoPressableCompact : null,
+              pressed ? styles.photoPressablePressed : null
+            ]}
+          >
+            <Image source={photo} style={styles.photoImage} resizeMode="cover" />
+            <LinearGradient
+              colors={["rgba(7,11,22,0)", "rgba(7,11,22,0.45)"]}
+              start={{ x: 0.5, y: 0 }}
+              end={{ x: 0.5, y: 1 }}
+              style={styles.photoOverlay}
+            />
+            <View style={styles.photoBadge}>
+              <Ionicons name="expand-outline" size={14} color={colors.text} />
+            </View>
+          </Pressable>
+        ))}
+      </ScrollView>
+    </>
+  );
+}
+
+function PlacePreviewContent({
+  place,
+  photoWidth,
+  photoHeight,
+  onPhotoPress,
+  compact = false,
+  showMeta = true,
+  showPhotos = true,
+  showPhotoTitle = true
+}: {
+  place: Place;
+  photoWidth: number;
+  photoHeight: number;
+  onPhotoPress: (photo: ImageSourcePropType) => void;
+  compact?: boolean;
+  showMeta?: boolean;
+  showPhotos?: boolean;
+  showPhotoTitle?: boolean;
+}) {
+  return (
+    <>
+      {place.subtitle ? (
+        <Text
+          numberOfLines={compact ? 2 : undefined}
+          ellipsizeMode="tail"
+          style={compact ? styles.previewDescriptionCompact : styles.previewDescription}
+        >
+          {place.subtitle}
+        </Text>
+      ) : null}
+
+      {showMeta ? (
+        <View style={styles.metaRow}>
+          <MetaChip label={CATEGORY_LABELS[place.meta.category]} />
+          <MetaChip label={DIFFICULTY_LABELS[place.meta.difficulty]} />
+          <MetaChip label={`${place.meta.rewardXp} XP`} accent />
+        </View>
+      ) : null}
+
+      {showPhotos ? (
+        <PhotoGallery
+          photos={place.photos}
+          photoWidth={photoWidth}
+          photoHeight={photoHeight}
+          onPhotoPress={onPhotoPress}
+          compact={compact}
+          showTitle={showPhotoTitle}
+        />
+      ) : null}
+    </>
+  );
 }
 
 export function MapScreen() {
+  const navigation = useNavigation<BottomTabNavigationProp<MainTabParamList, "Map">>();
   const tabBarHeight = useBottomTabBarHeight();
+  const insets = useSafeAreaInsets();
+  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const { token } = useAuth();
 
   const mapRef = useRef<MapView | null>(null);
   const ignoreNextMapPressRef = useRef(false);
   const hasFittedPlacesRef = useRef(false);
+  const currentSheetHeightRef = useRef(0);
+  const dragStartHeightRef = useRef(0);
 
   const [locationPermission, setLocationPermission] = useState<"unknown" | "granted" | "denied">("unknown");
   const [userLocation, setUserLocation] = useState<LatLng | null>(null);
   const [places, setPlaces] = useState<Place[]>([]);
   const [tasks, setTasks] = useState<ApiTask[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [isPlaceSheetExpanded, setIsPlaceSheetExpanded] = useState(false);
+  const [sheetIndex, setSheetIndex] = useState(0);
   const [isLoadingPlaces, setIsLoadingPlaces] = useState(false);
   const [placesError, setPlacesError] = useState<string | null>(null);
   const [routeError, setRouteError] = useState<string | null>(null);
+  const [photoViewerSource, setPhotoViewerSource] = useState<ImageSourcePropType | null>(null);
+
+  const animatedSheetHeight = useRef(new Animated.Value(0)).current;
+  const heroPhotoWidth = Math.min(Math.max(Math.round(screenWidth * 0.44), 148), 188);
+  const heroPhotoHeight = Math.round(heroPhotoWidth * 0.6);
+  const isPlaceSelected = !!selectedId;
+  const sheetTopOffset = isPlaceSelected ? insets.top + 10 : insets.top + 14;
+  const sheetBottomOffset = isPlaceSelected ? 0 : tabBarHeight;
+  const sheetAvailableHeight = Math.max(320, screenHeight - sheetTopOffset - sheetBottomOffset);
+  const sheetSnapHeights = useMemo(
+    () => [
+      Math.max(COLLAPSED_SHEET_MIN_HEIGHT, Math.round(sheetAvailableHeight * SHEET_SNAP_POINTS[0])),
+      Math.round(sheetAvailableHeight * SHEET_SNAP_POINTS[1])
+    ],
+    [sheetAvailableHeight]
+  );
 
   const selectedPlace = useMemo(
     () => {
@@ -210,17 +353,49 @@ export function MapScreen() {
     [places, selectedId]
   );
 
-  const selectedDistanceEta = useMemo(() => {
+  const selectedPlaceTasks = useMemo(() => {
+    if (!selectedPlace?.backendId) return [];
+    return tasks.filter((task) => task.location_id === selectedPlace.backendId);
+  }, [selectedPlace, tasks]);
+
+  const distanceEtaLabel = useMemo(() => {
     if (!selectedPlace || !userLocation) return null;
     const distanceM = distanceBetweenMeters(userLocation, selectedPlace.coordinate);
     const etaMin = estimateWalkEtaMinutes(distanceM);
     return `${formatDistance(distanceM)} • ${etaMin} мин пешком`;
   }, [selectedPlace, userLocation]);
 
-  const selectedPlaceTasks = useMemo(() => {
-    if (!selectedPlace?.backendId) return [];
-    return tasks.filter((task) => task.location_id === selectedPlace.backendId);
-  }, [selectedPlace, tasks]);
+  const isCollapsedSheet = sheetIndex === 0;
+  const isFullSheet = sheetIndex === 1;
+  const collapsedSheetTop = screenHeight - sheetBottomOffset - sheetSnapHeights[0];
+  const heroMediaTop = Math.max(insets.top + 56, collapsedSheetTop - heroPhotoHeight - HERO_MEDIA_GAP);
+  const heroMediaOpacity = animatedSheetHeight.interpolate({
+    inputRange: [sheetSnapHeights[0], sheetSnapHeights[0] + 42, sheetSnapHeights[1]],
+    outputRange: [1, 0.55, 0],
+    extrapolate: "clamp"
+  });
+  const heroMediaTranslateY = animatedSheetHeight.interpolate({
+    inputRange: [sheetSnapHeights[0], sheetSnapHeights[1]],
+    outputRange: [0, -16],
+    extrapolate: "clamp"
+  });
+  const heroMediaScale = animatedSheetHeight.interpolate({
+    inputRange: [sheetSnapHeights[0], sheetSnapHeights[1]],
+    outputRange: [1, 0.94],
+    extrapolate: "clamp"
+  });
+  const stickyActionInset = Math.max(insets.bottom, space.xs) + 8;
+  const stickyActionBarHeight = stickyActionInset + 60;
+
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      tabBarStyle: isPlaceSelected ? hiddenMainTabBarStyle : mainTabBarStyle
+    });
+
+    return () => {
+      navigation.setOptions({ tabBarStyle: mainTabBarStyle });
+    };
+  }, [isPlaceSelected, navigation]);
 
   useEffect(() => {
     let subscription: Location.LocationSubscription | null = null;
@@ -325,8 +500,97 @@ export function MapScreen() {
   }, [selectedId]);
 
   useEffect(() => {
-    setIsPlaceSheetExpanded(false);
+    setPhotoViewerSource(null);
   }, [selectedId]);
+
+  useEffect(() => {
+    const listenerId = animatedSheetHeight.addListener(({ value }) => {
+      currentSheetHeightRef.current = value;
+    });
+
+    return () => {
+      animatedSheetHeight.removeListener(listenerId);
+    };
+  }, [animatedSheetHeight]);
+
+  useEffect(() => {
+    if (!selectedPlace) {
+      animatedSheetHeight.setValue(0);
+      currentSheetHeightRef.current = 0;
+      setSheetIndex(0);
+      return;
+    }
+
+    setSheetIndex(0);
+    animatedSheetHeight.setValue(sheetSnapHeights[0]);
+    currentSheetHeightRef.current = sheetSnapHeights[0];
+  }, [selectedId, selectedPlace, animatedSheetHeight, sheetSnapHeights]);
+
+  useEffect(() => {
+    if (!selectedPlace) return;
+
+    const nextHeight = sheetSnapHeights[sheetIndex] ?? sheetSnapHeights[0];
+    Animated.spring(animatedSheetHeight, {
+      toValue: nextHeight,
+      bounciness: 0,
+      speed: 18,
+      useNativeDriver: false
+    }).start();
+  }, [animatedSheetHeight, selectedPlace, sheetIndex, sheetSnapHeights]);
+
+  const snapToSheetIndex = (nextIndex: number) => {
+    setSheetIndex(clamp(nextIndex, 0, sheetSnapHeights.length - 1));
+  };
+
+  const findClosestSheetIndex = (height: number) => {
+    let closestIndex = 0;
+    let minDelta = Number.POSITIVE_INFINITY;
+
+    sheetSnapHeights.forEach((snapHeight, index) => {
+      const delta = Math.abs(snapHeight - height);
+      if (delta < minDelta) {
+        minDelta = delta;
+        closestIndex = index;
+      }
+    });
+
+    return closestIndex;
+  };
+
+  const cycleSheetState = () => {
+    snapToSheetIndex(isFullSheet ? 0 : 1);
+  };
+
+  const sheetPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, gestureState) =>
+          Math.abs(gestureState.dy) > 8 && Math.abs(gestureState.dy) > Math.abs(gestureState.dx),
+        onPanResponderGrant: () => {
+          dragStartHeightRef.current = currentSheetHeightRef.current || sheetSnapHeights[sheetIndex];
+        },
+        onPanResponderMove: (_, gestureState) => {
+          const nextHeight = clamp(
+            dragStartHeightRef.current - gestureState.dy,
+            sheetSnapHeights[0],
+            sheetSnapHeights[sheetSnapHeights.length - 1]
+          );
+          animatedSheetHeight.setValue(nextHeight);
+        },
+        onPanResponderRelease: (_, gestureState) => {
+          const projectedHeight = clamp(
+            currentSheetHeightRef.current - gestureState.vy * 48,
+            sheetSnapHeights[0],
+            sheetSnapHeights[sheetSnapHeights.length - 1]
+          );
+          snapToSheetIndex(findClosestSheetIndex(projectedHeight));
+        },
+        onPanResponderTerminate: () => {
+          snapToSheetIndex(findClosestSheetIndex(currentSheetHeightRef.current));
+        }
+      }),
+    [animatedSheetHeight, sheetIndex, sheetSnapHeights]
+  );
 
   const onMapPress = () => {
     if (ignoreNextMapPressRef.current) {
@@ -335,7 +599,6 @@ export function MapScreen() {
     }
 
     setSelectedId(null);
-    setIsPlaceSheetExpanded(false);
   };
 
   const selectPlace = (id: string) => {
@@ -393,12 +656,17 @@ export function MapScreen() {
     selectPlace(id);
   };
 
+  const showTasksSection = !!selectedPlace && !selectedPlace.isCustom && isFullSheet;
+
   return (
-    <Screen style={styles.screen} contentContainerStyle={styles.container}>
-      <View style={styles.mapArea}>
-        <View style={{ flex: 1 }}>
+    <>
+      <Screen style={styles.screen} contentContainerStyle={styles.container}>
+        <View style={styles.mapArea}>
+          {!isPlaceSelected ? (
+            <View style={styles.mapTitleWrap}>
           <Text style={styles.title}>Открой город</Text>
         </View>
+          ) : null}
 
         {Platform.OS === "web" ? (
           <View style={styles.mapOverlay}>
@@ -450,7 +718,8 @@ export function MapScreen() {
 
         {Platform.OS !== "web" ? (
           <>
-            <View style={styles.mapControls}>
+            {!isPlaceSelected ? (
+              <View style={styles.mapControls}>
               <Pressable
                 onPress={centerOnMe}
                 accessibilityRole="button"
@@ -461,7 +730,8 @@ export function MapScreen() {
                   <Ionicons name="locate" size={18} color={colors.text} />
                 </IconCircle>
               </Pressable>
-            </View>
+              </View>
+            ) : null}
 
             {locationPermission === "unknown" || (isLoadingPlaces && places.length === 0) ? (
               <View style={styles.mapOverlay}>
@@ -491,217 +761,228 @@ export function MapScreen() {
             ) : null}
           </>
         ) : null}
-      </View>
+        </View>
 
-      {selectedPlace ? (
-        <View
-          pointerEvents="box-none"
-          style={[styles.placeCardWrap, { top: 72, bottom: tabBarHeight }]}
-        >
-          <GlassCard style={styles.placeCard}>
-            <View style={styles.placeHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.placeTitle}>{selectedPlace.title}</Text>
-                <Text style={styles.placeDistanceEta}>
-                  {selectedDistanceEta ?? selectedPlace.address ?? formatCoords(selectedPlace.coordinate)}
-                </Text>
-              </View>
-              <Pressable
-                onPress={() => setIsPlaceSheetExpanded((prev) => !prev)}
-                accessibilityRole="button"
-                accessibilityLabel={isPlaceSheetExpanded ? "Свернуть детали" : "Развернуть детали"}
-                hitSlop={10}
-              >
-                <IconCircle size={36} backgroundColor="rgba(255,255,255,0.06)" borderColor={colors.border}>
-                  <Ionicons
-                    name={isPlaceSheetExpanded ? "chevron-down" : "chevron-up"}
-                    size={18}
-                    color={colors.muted}
-                  />
-                </IconCircle>
-              </Pressable>
-              <Pressable
-                onPress={() => {
-                  setSelectedId(null);
-                  setIsPlaceSheetExpanded(false);
-                }}
-                accessibilityRole="button"
-                accessibilityLabel="Закрыть"
-                hitSlop={10}
-              >
-                <IconCircle size={36} backgroundColor="rgba(255,255,255,0.06)" borderColor={colors.border}>
-                  <Ionicons name="close" size={18} color={colors.muted} />
-                </IconCircle>
-              </Pressable>
-            </View>
+        {selectedPlace?.photos.length ? (
+          <Animated.View
+            pointerEvents={isCollapsedSheet ? "box-none" : "none"}
+            style={[
+              styles.heroMediaWrap,
+              {
+                top: heroMediaTop,
+                opacity: heroMediaOpacity,
+                transform: [{ translateY: heroMediaTranslateY }, { scale: heroMediaScale }]
+              }
+            ]}
+          >
+            <PhotoGallery
+              photos={selectedPlace.photos}
+              photoWidth={heroPhotoWidth}
+              photoHeight={heroPhotoHeight}
+              onPhotoPress={setPhotoViewerSource}
+              compact
+              showTitle={false}
+            />
+          </Animated.View>
+        ) : null}
 
-            {isPlaceSheetExpanded ? (
-              <ScrollView
-                style={styles.placeDetailsScroll}
-                contentContainerStyle={styles.placeDetailsContent}
-                showsVerticalScrollIndicator={false}
-                nestedScrollEnabled
-              >
-                <Text style={styles.placeSubtitle}>
-                  {selectedPlace.subtitle ?? formatCoords(selectedPlace.coordinate)}
-                </Text>
-                <Text style={styles.placeMeta}>{formatPointMeta(selectedPlace.meta)}</Text>
+        {selectedPlace ? (
+          <View
+            pointerEvents="box-none"
+            style={[styles.placeCardWrap, { top: sheetTopOffset, bottom: sheetBottomOffset }]}
+          >
+            <Animated.View style={[styles.placeSheet, { height: animatedSheetHeight }]}>
+              <GlassCard style={styles.placeCard}>
+                <View style={styles.sheetGrabArea} {...sheetPanResponder.panHandlers}>
+                  <View style={styles.sheetHandle} />
 
-                {selectedPlace.photos?.length ? (
-                  <>
-                    <Text style={styles.sectionLabel}>Фото</Text>
-                    <ScrollView
-                      horizontal
-                      showsHorizontalScrollIndicator={false}
-                      contentContainerStyle={styles.photosRow}
-                    >
-                      {selectedPlace.photos.map((photo, index) => (
-                        <Image
-                          key={`${selectedPlace.id}-photo-${index}`}
-                          source={photo}
-                          style={styles.photoCard}
-                          resizeMode="cover"
-                        />
-                      ))}
-                    </ScrollView>
-                  </>
-                ) : null}
-
-                {selectedPlace.description ? (
-                  <>
-                    <Text style={styles.sectionLabel}>Описание</Text>
-                    <View style={styles.descriptionBlock}>
-                      <Text style={[styles.placeBody, styles.descriptionText]}>
-                        {selectedPlace.description}
+                  <View style={styles.placeHeader}>
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        numberOfLines={isCollapsedSheet ? 2 : undefined}
+                        style={[styles.placeTitle, isCollapsedSheet ? styles.placeTitleCollapsed : null]}
+                      >
+                        {selectedPlace.title}
+                      </Text>
+                      <Text style={[styles.placeDistanceEta, isCollapsedSheet ? styles.placeDistanceEtaCollapsed : null]}>
+                        {distanceEtaLabel ?? selectedPlace.address ?? formatCoords(selectedPlace.coordinate)}
                       </Text>
                     </View>
-                  </>
-                ) : null}
-
-                {selectedPlace.address ? (
-                  <>
-                    <Text style={styles.sectionLabel}>Адрес</Text>
-                    <Text style={styles.placeBody}>{selectedPlace.address}</Text>
-                  </>
-                ) : null}
-
-                {selectedPlace.activities?.length ? (
-                  <>
-                    <Text style={styles.sectionLabel}>Чем заняться</Text>
-                    <View style={styles.activitiesList}>
-                      {selectedPlace.activities.map((activity) => (
-                        <View key={activity} style={styles.activityRow}>
-                          <View style={styles.activityDot} />
-                          <Text style={styles.activityText}>{activity}</Text>
-                        </View>
-                      ))}
+                    <View style={styles.headerActions}>
+                      <Pressable
+                        onPress={cycleSheetState}
+                        accessibilityRole="button"
+                        accessibilityLabel={
+                          isFullSheet ? "Свернуть карточку" : "Развернуть карточку"
+                        }
+                        hitSlop={8}
+                      >
+                        <IconCircle
+                          size={30}
+                          backgroundColor="rgba(255,255,255,0.025)"
+                          borderColor="rgba(255,255,255,0.05)"
+                        >
+                          <Ionicons
+                            name={isFullSheet ? "chevron-down" : "chevron-up"}
+                            size={15}
+                            color="rgba(244,247,255,0.58)"
+                          />
+                        </IconCircle>
+                      </Pressable>
+                      <Pressable
+                        onPress={() => {
+                          setSelectedId(null);
+                        }}
+                        accessibilityRole="button"
+                        accessibilityLabel="Закрыть"
+                        hitSlop={8}
+                      >
+                        <IconCircle
+                          size={30}
+                          backgroundColor="rgba(255,255,255,0.025)"
+                          borderColor="rgba(255,255,255,0.05)"
+                        >
+                          <Ionicons name="close" size={15} color="rgba(244,247,255,0.58)" />
+                        </IconCircle>
+                      </Pressable>
                     </View>
-                  </>
-                ) : null}
-
-                <Text style={styles.sectionLabel}>Задания</Text>
-                {selectedPlaceTasks.length ? (
-                  <View style={styles.taskList}>
-                    {selectedPlaceTasks.map((task) => {
-                      const pillStyle = difficultyPillStyle(task.difficulty);
-                      const progressPercent = Math.round(task.progress * 100);
-                      return (
-                        <View key={task.id} style={styles.taskCard}>
-                          <View style={styles.taskCardHeader}>
-                            <Text style={styles.taskTitle}>{task.title}</Text>
-                            <View
-                              style={[
-                                styles.taskDifficultyPill,
-                                {
-                                  backgroundColor: pillStyle.backgroundColor,
-                                  borderColor: pillStyle.borderColor
-                                }
-                              ]}
-                            >
-                              <Text style={[styles.taskDifficultyText, { color: pillStyle.color }]}>
-                                {TASK_DIFFICULTY_LABELS[task.difficulty]}
-                              </Text>
-                            </View>
-                          </View>
-                          <Text style={styles.taskSubtitle}>{task.subtitle}</Text>
-                          <View style={styles.taskMetaRow}>
-                            <Text style={styles.taskReward}>+{task.reward_xp} XP</Text>
-                            <Text style={styles.taskMetaText}>{task.time_left}</Text>
-                            <Text style={styles.taskMetaText}>{progressPercent}%</Text>
-                          </View>
-                          <View style={styles.taskRewardBox}>
-                            <Ionicons name="gift-outline" size={14} color={colors.accent} />
-                            <Text style={styles.taskRewardBoxText}>{task.reward_text}</Text>
-                          </View>
-                          <Text style={styles.taskProgressText}>{task.progress_text}</Text>
-                        </View>
-                      );
-                    })}
                   </View>
-                ) : (
-                  <View style={styles.emptyTasksState}>
-                    <Text style={styles.emptyTasksText}>
-                      Для этой локации задания пока не добавлены.
-                    </Text>
-                  </View>
-                )}
-
-                {routeError ? <Text style={styles.routeError}>{routeError}</Text> : null}
-
-                <View style={styles.placeActions}>
-                  <Pressable
-                    onPress={openInMaps}
-                    accessibilityRole="button"
-                    accessibilityLabel="Открыть в картах"
-                    style={styles.secondaryBtnSingle}
-                  >
-                    <Ionicons name="navigate-outline" size={18} color={colors.text} />
-                    <Text style={styles.secondaryBtnText}>В картах</Text>
-                  </Pressable>
                 </View>
-              </ScrollView>
-            ) : (
-              <>
-                <Text style={styles.placeSubtitle}>
-                  {selectedPlace.subtitle ?? formatCoords(selectedPlace.coordinate)}
-                </Text>
-                <Text style={styles.placeMeta}>{formatPointMeta(selectedPlace.meta)}</Text>
 
-                {selectedPlace.photos?.length ? (
-                  <>
-                    <Text style={styles.sectionLabel}>Фото</Text>
-                    <ScrollView
-                      horizontal
-                      showsHorizontalScrollIndicator={false}
-                      contentContainerStyle={styles.photosRow}
-                    >
-                      {selectedPlace.photos.map((photo, index) => (
-                        <Image
-                          key={`${selectedPlace.id}-preview-photo-${index}`}
-                          source={photo}
-                          style={styles.photoCard}
-                          resizeMode="cover"
-                        />
-                      ))}
-                    </ScrollView>
-                  </>
-                ) : null}
+                <View style={[styles.routeSection, { paddingBottom: stickyActionInset }]}>
+                  <RoutePrimaryButton onPress={openInMaps} compact={isCollapsedSheet} />
+                  {routeError ? <Text style={styles.routeError}>{routeError}</Text> : null}
+                </View>
 
-                <Pressable
-                  onPress={() => setIsPlaceSheetExpanded(true)}
-                  accessibilityRole="button"
-                  accessibilityLabel="Развернуть детали точки"
-                  style={styles.sheetExpandHint}
-                >
-                  <Text style={styles.sheetExpandHintText}>Подробнее</Text>
-                  <Ionicons name="chevron-up" size={16} color={colors.muted} />
-                </Pressable>
-              </>
-            )}
-          </GlassCard>
+                {isCollapsedSheet ? (
+                  <Pressable
+                    onPress={() => snapToSheetIndex(1)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Развернуть карточку клуба"
+                    style={[styles.collapsedTapArea, { paddingBottom: stickyActionBarHeight - 20 }]}
+                    {...sheetPanResponder.panHandlers}
+                  >
+                    <PlacePreviewContent
+                      place={selectedPlace}
+                      photoWidth={heroPhotoWidth}
+                      photoHeight={heroPhotoHeight}
+                      onPhotoPress={setPhotoViewerSource}
+                      compact
+                      showMeta={false}
+                      showPhotos={false}
+                    />
+                  </Pressable>
+                ) : (
+                  <ScrollView
+                    style={styles.placeDetailsScroll}
+                    contentContainerStyle={[styles.placeDetailsContent, { paddingBottom: stickyActionBarHeight }]}
+                    showsVerticalScrollIndicator={false}
+                    nestedScrollEnabled
+                  >
+                    <PlacePreviewContent
+                      place={selectedPlace}
+                      photoWidth={heroPhotoWidth}
+                      photoHeight={heroPhotoHeight}
+                      onPhotoPress={setPhotoViewerSource}
+                      showPhotos={false}
+                    />
+
+                    {selectedPlace.description ? (
+                      <View style={styles.sectionBlock}>
+                        <Text style={styles.sectionTitle}>Описание</Text>
+                        <View style={styles.descriptionBlock}>
+                          <Text style={styles.descriptionText}>{selectedPlace.description}</Text>
+                        </View>
+                      </View>
+                    ) : null}
+
+                    {selectedPlace.activities?.length ? (
+                      <View style={styles.sectionBlock}>
+                        <Text style={styles.sectionTitle}>Чем заняться</Text>
+                        <View style={styles.activitiesCard}>
+                          {selectedPlace.activities.map((activity, index) => (
+                            <View
+                              key={activity}
+                              style={[styles.activityRow, index > 0 ? styles.activityRowSpaced : null]}
+                            >
+                              <View style={styles.activityBullet} />
+                              <Text style={styles.activityText}>{activity}</Text>
+                            </View>
+                          ))}
+                        </View>
+                      </View>
+                    ) : null}
+
+                    {isFullSheet && selectedPlace.address ? (
+                      <View style={styles.sectionBlock}>
+                        <Text style={styles.sectionTitle}>Адрес</Text>
+                        <View style={styles.infoCard}>
+                          <Ionicons name="location-outline" size={16} color={colors.success} />
+                          <Text style={styles.infoCardText}>{selectedPlace.address}</Text>
+                        </View>
+                      </View>
+                    ) : null}
+
+                    {showTasksSection ? (
+                      <View style={styles.sectionBlock}>
+                        <View style={styles.sectionTitleRow}>
+                          <Text style={[styles.sectionTitle, { marginBottom: 0 }]}>Задания</Text>
+                          <Text style={styles.sectionCaption}>{selectedPlaceTasks.length}</Text>
+                        </View>
+                        {selectedPlaceTasks.length ? (
+                          <View style={styles.taskList}>
+                            {selectedPlaceTasks.map((task) => (
+                              <LocationTaskCard key={task.id} task={task} />
+                            ))}
+                          </View>
+                        ) : (
+                          <View style={styles.emptyTasksState}>
+                            <Text style={styles.emptyTasksText}>
+                              Для этой локации задания пока не добавлены.
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+                    ) : null}
+                  </ScrollView>
+                )}
+              </GlassCard>
+            </Animated.View>
+          </View>
+        ) : null}
+      </Screen>
+
+      <Modal
+        visible={!!photoViewerSource}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPhotoViewerSource(null)}
+      >
+        <View style={styles.photoModalOverlay}>
+          <Pressable
+            style={StyleSheet.absoluteFillObject}
+            onPress={() => setPhotoViewerSource(null)}
+            accessibilityRole="button"
+            accessibilityLabel="Закрыть просмотр фото"
+          />
+
+          <View style={styles.photoModalCard}>
+            <Pressable
+              onPress={() => setPhotoViewerSource(null)}
+              accessibilityRole="button"
+              accessibilityLabel="Закрыть просмотр фото"
+              style={styles.photoModalClose}
+            >
+              <Ionicons name="close" size={20} color={colors.text} />
+            </Pressable>
+
+            {photoViewerSource ? (
+              <Image source={photoViewerSource} resizeMode="contain" style={styles.photoModalImage} />
+            ) : null}
+          </View>
         </View>
-      ) : null}
-    </Screen>
+      </Modal>
+    </>
   );
 }
 
@@ -718,6 +999,13 @@ const styles = StyleSheet.create({
   },
   mapArea: {
     flex: 1
+  },
+  mapTitleWrap: {
+    position: "absolute",
+    top: space.lg,
+    left: space.lg,
+    right: space.lg,
+    zIndex: 12
   },
   mapControls: {
     position: "absolute",
@@ -758,231 +1046,362 @@ const styles = StyleSheet.create({
     zIndex: 30,
     justifyContent: "flex-end"
   },
+  heroMediaWrap: {
+    position: "absolute",
+    left: space.lg,
+    right: space.lg,
+    zIndex: 24
+  },
+  placeSheet: {
+    width: "100%"
+  },
   placeCard: {
-    padding: space.md,
-    borderRadius: radii.md,
+    flex: 1,
+    paddingHorizontal: space.md,
+    paddingTop: space.xs,
+    paddingBottom: 0,
+    borderRadius: radii.lg,
     backgroundColor: colors.bg1,
-    borderColor: "rgba(255,255,255,0.12)",
+    borderColor: "rgba(255,255,255,0.10)",
     borderWidth: 1,
-    maxHeight: "100%"
+    overflow: "hidden",
+    shadowColor: "#000000",
+    shadowOpacity: 0.35,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 16 },
+    elevation: 10
+  },
+  sheetGrabArea: {
+    paddingBottom: 0
+  },
+  sheetHandle: {
+    alignSelf: "center",
+    width: 40,
+    height: 4,
+    borderRadius: radii.pill,
+    backgroundColor: "rgba(255,255,255,0.12)",
+    marginBottom: 8
   },
   placeHeader: {
     flexDirection: "row",
-    alignItems: "center"
-  },
-  placeTitle: {
-    color: colors.text,
-    fontSize: 16,
-    fontWeight: "900"
-  },
-  placeDistanceEta: {
-    color: colors.accent,
-    fontSize: 13,
-    marginTop: 4,
-    fontWeight: "700"
-  },
-  placeSubtitle: {
-    color: colors.muted,
-    fontSize: 12,
-    marginTop: 4
-  },
-  placeMeta: {
-    color: colors.accent,
-    fontSize: 11,
-    marginTop: 6,
-    fontWeight: "700"
-  },
-  sectionLabel: {
-    color: colors.text,
-    fontSize: 12,
-    fontWeight: "800",
-    marginTop: space.md
-  },
-  placeBody: {
-    color: colors.muted,
-    fontSize: 12,
-    lineHeight: 18,
-    marginTop: 6
-  },
-  descriptionBlock: {
-    marginTop: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    borderRadius: radii.md,
-    backgroundColor: colors.tabBar,
-    borderWidth: 1,
-    borderColor: colors.border
-  },
-  descriptionText: {
-    marginTop: 0
-  },
-  photosRow: {
-    marginTop: 6,
-    paddingRight: 4
-  },
-  placeDetailsScroll: {
-    marginTop: space.xs
-  },
-  placeDetailsContent: {
-    paddingBottom: space.xs
-  },
-  photoCard: {
-    width: 220,
-    height: 150,
-    borderRadius: radii.md,
-    marginRight: 10,
-    backgroundColor: colors.tabBar,
-    borderWidth: 1,
-    borderColor: colors.border
-  },
-  activitiesList: {
-    marginTop: space.sm
-  },
-  activityRow: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    marginTop: 6
-  },
-  activityDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: colors.accent2,
-    marginTop: 6,
-    marginRight: 8
-  },
-  activityText: {
-    flex: 1,
-    color: colors.muted,
-    fontSize: 12,
-    lineHeight: 18
-  },
-  taskList: {
-    marginTop: space.sm
-  },
-  taskCard: {
-    marginBottom: space.sm,
-    padding: space.md,
-    borderRadius: radii.md,
-    backgroundColor: colors.tabBar,
-    borderWidth: 1,
-    borderColor: colors.border
-  },
-  taskCardHeader: {
-    flexDirection: "row",
     alignItems: "flex-start"
   },
-  taskTitle: {
-    flex: 1,
-    color: colors.text,
-    fontSize: 13,
+  placeTitle: {
+    color: colors.textSoft,
+    fontSize: 22,
     fontWeight: "900",
-    paddingRight: 10
+    lineHeight: 28,
+    paddingRight: space.sm
   },
-  taskDifficultyPill: {
-    borderRadius: radii.pill,
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 5
+  placeTitleCollapsed: {
+    fontSize: 20,
+    lineHeight: 25
   },
-  taskDifficultyText: {
-    fontSize: 10,
-    fontWeight: "900"
+  placeDistanceEta: {
+    color: colors.success,
+    fontSize: 14,
+    marginTop: 6,
+    fontWeight: "700"
   },
-  taskSubtitle: {
-    color: colors.muted,
-    fontSize: 12,
-    lineHeight: 18,
-    marginTop: 8
+  placeDistanceEtaCollapsed: {
+    marginTop: 4,
+    fontSize: 13
   },
-  taskMetaRow: {
+  headerActions: {
     flexDirection: "row",
     alignItems: "center",
-    flexWrap: "wrap",
-    marginTop: space.sm
+    marginLeft: space.sm,
+    gap: 6
   },
-  taskReward: {
-    color: colors.accent2,
-    fontSize: 12,
-    fontWeight: "900",
-    marginRight: 12
+  routeSection: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 4,
+    paddingHorizontal: space.md,
+    paddingTop: space.xs,
+    backgroundColor: "rgba(11,18,32,0.94)",
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.06)",
+    shadowColor: "#000000",
+    shadowOpacity: 0.22,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: -6 },
+    elevation: 10
   },
-  taskMetaText: {
-    color: colors.muted,
-    fontSize: 11,
-    fontWeight: "700",
-    marginRight: 12
-  },
-  taskRewardBox: {
-    marginTop: space.sm,
-    flexDirection: "row",
-    alignItems: "center"
-  },
-  taskRewardBoxText: {
-    flex: 1,
-    color: colors.text,
-    fontSize: 11,
-    lineHeight: 16,
-    marginLeft: 8
-  },
-  taskProgressText: {
-    color: colors.muted,
-    fontSize: 11,
-    marginTop: space.sm
-  },
-  emptyTasksState: {
-    marginTop: space.sm,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    borderRadius: radii.md,
-    backgroundColor: colors.tabBar,
-    borderWidth: 1,
-    borderColor: colors.border
-  },
-  emptyTasksText: {
-    color: colors.muted,
-    fontSize: 12,
-    lineHeight: 18
-  },
-  routeError: {
-    marginTop: space.sm,
-    color: colors.warning,
-    fontSize: 12,
-    lineHeight: 16
-  },
-  placeActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginTop: space.md,
-    justifyContent: "flex-end"
-  },
-  sheetExpandHint: {
-    marginTop: space.sm,
+  routeButton: {
+    minHeight: 46,
+    borderRadius: radii.lg,
+    paddingHorizontal: 16,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 8
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    shadowColor: "#000000",
+    shadowOpacity: 0.16,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4
   },
-  sheetExpandHintText: {
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: "700",
-    marginRight: 4
+  routeButtonCompact: {
+    minHeight: 40,
+    borderRadius: radii.md
   },
-  secondaryBtnText: {
-    color: colors.text,
+  routeButtonText: {
+    marginLeft: 8,
+    color: colors.textSoft,
+    fontSize: 13,
+    fontWeight: "900"
+  },
+  routeButtonTextCompact: {
+    fontSize: 12
+  },
+  previewDescription: {
+    color: "rgba(230,237,248,0.76)",
     fontSize: 14,
-    fontWeight: "800",
-    marginLeft: 8
+    lineHeight: 22
   },
-  secondaryBtnSingle: {
+  previewDescriptionCompact: {
+    color: "rgba(230,237,248,0.74)",
+    fontSize: 12,
+    lineHeight: 17
+  },
+  collapsedTapArea: {
+    paddingTop: 6,
+    paddingBottom: 2
+  },
+  metaRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    marginTop: 12,
+    marginBottom: 14
+  },
+  metaChip: {
+    marginRight: space.xs,
+    marginBottom: space.xs,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: radii.pill,
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.07)"
+  },
+  metaChipAccent: {
+    backgroundColor: "rgba(201,231,117,0.10)",
+    borderColor: "rgba(201,231,117,0.16)"
+  },
+  metaChipText: {
+    color: colors.muted,
+    fontSize: 11,
+    fontWeight: "700"
+  },
+  metaChipTextAccent: {
+    color: colors.xp
+  },
+  descriptionBlock: {
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    borderRadius: radii.md,
+    backgroundColor: "rgba(8,16,31,0.96)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)"
+  },
+  descriptionText: {
+    color: "rgba(230,237,248,0.82)",
+    fontSize: 14,
+    lineHeight: 23
+  },
+  photosRow: {
+    paddingRight: space.xs,
+    paddingBottom: 4
+  },
+  photosRowCompact: {
+    paddingTop: 0
+  },
+  placeDetailsScroll: {
+    flex: 1,
+    marginTop: space.sm
+  },
+  placeDetailsContent: {
+    paddingBottom: space.xl
+  },
+  sectionBlock: {
+    marginTop: space.lg
+  },
+  sectionTitle: {
+    color: colors.textSoft,
+    fontSize: 15,
+    fontWeight: "900",
+    marginBottom: space.sm
+  },
+  sectionTitleRow: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 12,
-    paddingHorizontal: 14,
+    justifyContent: "space-between",
+    marginBottom: space.sm
+  },
+  sectionCaption: {
+    minWidth: 28,
+    textAlign: "center",
+    color: colors.xp,
+    fontSize: 11,
+    fontWeight: "900",
+    paddingHorizontal: 8,
+    paddingVertical: 5,
     borderRadius: radii.pill,
-    backgroundColor: "rgba(7,11,22,0.55)",
-    borderColor: colors.border,
-    borderWidth: 1
+    backgroundColor: "rgba(201,231,117,0.10)",
+    borderWidth: 1,
+    borderColor: "rgba(201,231,117,0.16)"
+  },
+  infoCard: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    borderRadius: radii.md,
+    backgroundColor: "rgba(8,16,31,0.92)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)"
+  },
+  infoCardText: {
+    flex: 1,
+    marginLeft: 10,
+    color: "rgba(230,237,248,0.78)",
+    fontSize: 14,
+    lineHeight: 22
+  },
+  activitiesCard: {
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    borderRadius: radii.md,
+    backgroundColor: "rgba(8,16,31,0.92)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)"
+  },
+  activityRow: {
+    flexDirection: "row",
+    alignItems: "flex-start"
+  },
+  activityRowSpaced: {
+    marginTop: 12
+  },
+  activityBullet: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: "rgba(89,197,145,0.16)",
+    borderWidth: 1,
+    borderColor: "rgba(89,197,145,0.36)",
+    marginTop: 6,
+    marginRight: 10
+  },
+  activityText: {
+    flex: 1,
+    color: "rgba(230,237,248,0.74)",
+    fontSize: 14,
+    lineHeight: 21
+  },
+  taskList: {
+    marginTop: 0
+  },
+  emptyTasksState: {
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    borderRadius: radii.md,
+    backgroundColor: "rgba(8,16,31,0.92)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)"
+  },
+  emptyTasksText: {
+    color: "rgba(230,237,248,0.70)",
+    fontSize: 13,
+    lineHeight: 20
+  },
+  routeError: {
+    marginTop: space.xs,
+    color: colors.warning,
+    fontSize: 12,
+    lineHeight: 16,
+    textAlign: "center"
+  },
+  photoPressable: {
+    marginRight: 12,
+    borderRadius: radii.lg,
+    overflow: "hidden",
+    backgroundColor: "rgba(12,22,39,0.92)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    shadowColor: "#000000",
+    shadowOpacity: 0.18,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4
+  },
+  photoPressableCompact: {
+    marginRight: 8,
+    borderRadius: 14,
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2
+  },
+  photoPressablePressed: {
+    opacity: 0.92
+  },
+  photoImage: {
+    width: "100%",
+    height: "100%"
+  },
+  photoOverlay: {
+    ...StyleSheet.absoluteFillObject
+  },
+  photoBadge: {
+    position: "absolute",
+    right: 10,
+    bottom: 10,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(7,11,22,0.56)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)"
+  },
+  photoModalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.92)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: space.lg
+  },
+  photoModalCard: {
+    width: "100%",
+    maxWidth: 420,
+    borderRadius: radii.lg,
+    overflow: "hidden",
+    backgroundColor: colors.bg0,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)"
+  },
+  photoModalClose: {
+    position: "absolute",
+    top: 12,
+    right: 12,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 2,
+    backgroundColor: "rgba(7,11,22,0.76)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)"
+  },
+  photoModalImage: {
+    width: "100%",
+    aspectRatio: 1
   }
 });
